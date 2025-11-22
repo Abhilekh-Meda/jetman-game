@@ -15,34 +15,29 @@ export default function AuthCallback() {
         const { data } = await supabase.auth.getSession();
 
         if (data.session) {
-          // Create user profile if first login
-          const { data: profile } = await supabase
-            .from('users')
-            .select('*')
-            .eq('id', data.session.user.id)
-            .single();
-
-          if (!profile) {
-            // First login - create profile
-            const { error } = await supabase.from('users').insert([
-              {
-                id: data.session.user.id,
-                email: data.session.user.email,
-                display_name: data.session.user.user_metadata?.full_name ||
-                             data.session.user.email?.split('@')[0] ||
-                             'Player',
-                avatar_url: data.session.user.user_metadata?.avatar_url,
-                elo: 1000,
-                games_played: 0,
-                wins: 0,
-                losses: 0,
+          // Register user with backend (ensures user table entry with service role)
+          try {
+            const response = await fetch(`${process.env.NEXT_PUBLIC_GAME_SERVER_URL}/api/auth/register`, {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
               },
-            ]);
+              body: JSON.stringify({
+                userId: data.session.user.id,
+                email: data.session.user.email,
+                displayName: data.session.user.user_metadata?.full_name ||
+                            data.session.user.email?.split('@')[0] ||
+                            'Player',
+                avatarUrl: data.session.user.user_metadata?.avatar_url,
+              }),
+            });
 
-            if (error && error.code !== 'PGRST116') {
-              // PGRST116 is duplicate key error, which means it already exists
-              console.error('Error creating profile:', error);
+            if (!response.ok) {
+              console.error('Failed to register user with backend');
             }
+          } catch (error) {
+            console.error('Error calling register endpoint:', error);
+            // Continue anyway - user auth succeeded
           }
 
           router.push('/lobby');

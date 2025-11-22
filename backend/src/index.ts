@@ -70,6 +70,52 @@ app.get('/health', (req, res) => {
   });
 });
 
+app.post('/api/auth/register', async (req, res) => {
+  try {
+    const { userId, email, displayName, avatarUrl } = req.body;
+
+    if (!userId || !email) {
+      return res.status(400).json({ error: 'Missing required fields' });
+    }
+
+    // Check if user already exists
+    const { data: existingUser } = await supabase
+      .from('users')
+      .select('id')
+      .eq('id', userId)
+      .single();
+
+    if (existingUser) {
+      // User already exists, just return success
+      return res.json({ success: true, isNew: false });
+    }
+
+    // Create new user
+    const { error } = await supabase.from('users').insert([
+      {
+        id: userId,
+        email,
+        display_name: displayName || email.split('@')[0] || 'Player',
+        avatar_url: avatarUrl || null,
+        elo: 1000,
+        games_played: 0,
+        wins: 0,
+        losses: 0,
+      },
+    ]);
+
+    if (error) {
+      console.error('Error creating user:', error);
+      return res.status(500).json({ error: 'Failed to create user profile' });
+    }
+
+    res.json({ success: true, isNew: true });
+  } catch (error) {
+    console.error('Error in auth/register:', error);
+    res.status(500).json({ error: 'Failed to register user' });
+  }
+});
+
 app.post('/api/game/create', async (req, res) => {
   try {
     const token = req.headers.authorization?.split(' ')[1];
