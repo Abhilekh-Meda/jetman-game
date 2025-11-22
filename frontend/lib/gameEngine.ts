@@ -1,5 +1,5 @@
 import { Player, GameState } from './types';
-import { PHYSICS_CONSTANTS, GAME_CONSTANTS, updatePlayerPhysics, checkBoundaryCollision, handlePlatformCollision, checkPlatformCollision } from '../../shared/physics';
+import { PHYSICS_CONSTANTS, GAME_CONSTANTS, updatePlayerPhysics, checkBoundaryCollision, handlePlatformCollision, checkPlatformCollision } from './physics';
 
 export interface PlayerInput {
   id: number;

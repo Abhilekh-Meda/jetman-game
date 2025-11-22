@@ -70,6 +70,158 @@ app.get('/health', (req, res) => {
   });
 });
 
+app.post('/api/game/create', async (req, res) => {
+  try {
+    const token = req.headers.authorization?.split(' ')[1];
+    if (!token) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+
+    // Verify JWT token
+    const { data: authData, error } = await supabase.auth.getUser(token);
+    if (error || !authData.user) {
+      return res.status(401).json({ error: 'Invalid token' });
+    }
+
+    // Get user profile
+    const { data: userProfile } = await supabase
+      .from('users')
+      .select('*')
+      .eq('id', authData.user.id)
+      .single();
+
+    if (!userProfile) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    // Create game session (waiting for opponent)
+    const gameId = generateGameId();
+    const engine = new ServerGameEngine(gameId, authData.user.id, '', 1920, 1080);
+
+    const gameSession = {
+      id: gameId,
+      playerRed: authData.user.id,
+      playerBlue: '',
+      playerRedSocket: '',
+      playerBlueSocket: '',
+      engine,
+      status: 'countdown' as const,
+      countdownStartedAt: Date.now(),
+      disconnectedPlayer: null,
+      disconnectTimer: null,
+    };
+
+    gameSessions.set(gameId, gameSession);
+
+    res.json({
+      gameId,
+      link: `${process.env.FRONTEND_URL || 'http://localhost:3000'}/game/${gameId}?invite=${authData.user.id}`,
+    });
+  } catch (error) {
+    console.error('Error creating game:', error);
+    res.status(500).json({ error: 'Failed to create game' });
+  }
+});
+
+app.get('/api/leaderboard', async (req, res) => {
+  try {
+    const limit = Math.min(parseInt(req.query.limit as string) || 100, 500);
+
+    // Get top players by ELO with at least 10 games played
+    const { data: players, error } = await supabase
+      .from('users')
+      .select('id, display_name, elo, wins, losses, games_played')
+      .gte('games_played', 10)
+      .order('elo', { ascending: false })
+      .limit(limit);
+
+    if (error) {
+      return res.status(500).json({ error: 'Failed to fetch leaderboard' });
+    }
+
+    const leaderboard = (players || []).map((player, index) => ({
+      rank: index + 1,
+      id: player.id,
+      display_name: player.display_name,
+      elo: player.elo,
+      wins: player.wins,
+      losses: player.losses,
+      games_played: player.games_played,
+      winRate: player.games_played > 0 ? (player.wins / player.games_played * 100).toFixed(1) : 0,
+    }));
+
+    res.json({ leaderboard });
+  } catch (error) {
+    console.error('Error fetching leaderboard:', error);
+    res.status(500).json({ error: 'Failed to fetch leaderboard' });
+  }
+});
+
+app.get('/api/users/:userId', async (req, res) => {
+  try {
+    const userId = req.params.userId;
+
+    const { data: user, error } = await supabase
+      .from('users')
+      .select('id, display_name, elo, wins, losses, games_played, avatar_url, created_at, last_played_at')
+      .eq('id', userId)
+      .single();
+
+    if (error || !user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    const winRate = user.games_played > 0 ? (user.wins / user.games_played * 100).toFixed(1) : 0;
+
+    res.json({
+      ...user,
+      winRate,
+    });
+  } catch (error) {
+    console.error('Error fetching user:', error);
+    res.status(500).json({ error: 'Failed to fetch user' });
+  }
+});
+
+app.get('/api/users/:userId/matches', async (req, res) => {
+  try {
+    const userId = req.params.userId;
+    const limit = Math.min(parseInt(req.query.limit as string) || 50, 200);
+
+    const { data: matches, error } = await supabase
+      .from('matches')
+      .select(
+        'id, game_session_id, player_red_id, player_blue_id, winner_id, ' +
+        'player_red_elo_before, player_blue_elo_before, player_red_elo_after, player_blue_elo_after, ' +
+        'final_score_red, final_score_blue, duration_seconds, played_at'
+      )
+      .or(`player_red_id.eq.${userId},player_blue_id.eq.${userId}`)
+      .order('played_at', { ascending: false })
+      .limit(limit);
+
+    if (error) {
+      return res.status(500).json({ error: 'Failed to fetch matches' });
+    }
+
+    const matchHistory = (matches || []).map((match) => ({
+      ...match,
+      isWin: match.winner_id === userId,
+      opponentId: match.player_red_id === userId ? match.player_blue_id : match.player_red_id,
+      userColor: match.player_red_id === userId ? 'red' : 'blue',
+      eloChange: match.player_red_id === userId
+        ? match.player_red_elo_after - match.player_red_elo_before
+        : match.player_blue_elo_after - match.player_blue_elo_before,
+      userScore: match.player_red_id === userId ? match.final_score_red : match.final_score_blue,
+      opponentScore: match.player_red_id === userId ? match.final_score_blue : match.final_score_red,
+    }));
+
+    res.json({ matches: matchHistory });
+  } catch (error) {
+    console.error('Error fetching matches:', error);
+    res.status(500).json({ error: 'Failed to fetch matches' });
+  }
+});
+
 // Socket.io handlers
 io.on('connection', (socket: any) => {
   console.log('Client connected:', socket.id);
@@ -161,7 +313,7 @@ io.on('connection', (socket: any) => {
     // Add player to game
     if (!gameSession.playerBlue) {
       gameSession.playerBlue = userId;
-      gameSession.status = 'ready';
+      gameSession.status = 'countdown';
     }
 
     socket.join(data.gameId);
@@ -212,20 +364,82 @@ io.on('connection', (socket: any) => {
       const gameId = activePlayers.get(userId);
       if (gameId) {
         const gameSession = gameSessions.get(gameId);
-        if (gameSession) {
+        if (gameSession && gameSession.status !== 'finished') {
           gameSession.disconnectedPlayer = userId;
-          gameSession.disconnectTimer = setTimeout(() => {
-            // Auto-forfeit after 15 seconds
-            const winnerId = userId === gameSession.playerRed ? gameSession.playerBlue : gameSession.playerRed;
-            endMatch(gameId, winnerId, userId, true);
-          }, 15000);
 
-          io.to(gameId).emit('opponent_disconnected', { reconnectWindowSeconds: 15 });
+          // Clear previous timer if exists
+          if (gameSession.disconnectTimer) {
+            clearTimeout(gameSession.disconnectTimer);
+          }
+
+          // Set 30-second reconnection window
+          gameSession.disconnectTimer = setTimeout(() => {
+            // Auto-forfeit after 30 seconds of disconnection
+            if (gameSession.disconnectedPlayer === userId) {
+              const winnerId = userId === gameSession.playerRed ? gameSession.playerBlue : gameSession.playerRed;
+              updatePlayerELO(gameSession, winnerId, userId);
+
+              io.to(gameId).emit('opponent_forfeited', {
+                winnerId,
+                reason: 'disconnection_timeout',
+              });
+
+              gameSessions.delete(gameId);
+              console.log(`Game ${gameId} forfeited: ${userId} disconnected for too long`);
+            }
+          }, 30000);
+
+          // Notify opponent of disconnection
+          io.to(gameId).emit('opponent_disconnected', {
+            disconnectedPlayerId: userId,
+            reconnectWindowSeconds: 30,
+          });
+
+          console.log(`Player ${userId} disconnected from game ${gameId}`);
         }
-        activePlayers.delete(userId);
       }
 
       console.log(`Player ${userId} disconnected`);
+    }
+  });
+
+  // Handle reconnection
+  socket.on('reconnect_game', (data: { gameId: string; userId: string }) => {
+    const userId = (socket as AuthenticatedSocket).userId;
+    if (!userId) {
+      socket.emit('error', { message: 'Not authenticated' });
+      return;
+    }
+
+    const gameSession = gameSessions.get(data.gameId);
+    if (!gameSession) {
+      socket.emit('error', { message: 'Game not found' });
+      return;
+    }
+
+    // Check if this player was disconnected
+    if (gameSession.disconnectedPlayer === userId) {
+      // Clear the disconnect timer
+      if (gameSession.disconnectTimer) {
+        clearTimeout(gameSession.disconnectTimer);
+        gameSession.disconnectTimer = null;
+      }
+
+      gameSession.disconnectedPlayer = null;
+      socket.join(data.gameId);
+
+      // Update active players mapping
+      activePlayers.set(userId, data.gameId);
+
+      // Notify both players that the game continues
+      io.to(data.gameId).emit('opponent_reconnected', {
+        reconnectedPlayerId: userId,
+        gameState: gameSession.engine.getState(),
+      });
+
+      console.log(`Player ${userId} reconnected to game ${data.gameId}`);
+    } else {
+      socket.emit('error', { message: 'You are not disconnected from this game' });
     }
   });
 });
@@ -334,15 +548,24 @@ setInterval(() => {
         const winner = gameSession.engine.getWinner();
         gameSession.status = 'finished';
 
+        const winnerId = winner === 'red' ? gameSession.playerRed : gameSession.playerBlue;
+        const loserId = winner === 'red' ? gameSession.playerBlue : gameSession.playerRed;
+
+        // Update ELO for both players
+        updatePlayerELO(gameSession, winnerId, loserId);
+
         io.to(gameId).emit('match_end', {
           gameId,
-          winnerId: winner === 'red' ? gameSession.playerRed : gameSession.playerBlue,
-          loserId: winner === 'red' ? gameSession.playerBlue : gameSession.playerRed,
+          winnerId,
+          loserId,
           finalScores: gameSession.engine.scores,
           duration: Math.floor((now - gameSession.countdownStartedAt) / 1000),
         });
 
         console.log(`Game ${gameId} ended. Winner: ${winner}`);
+
+        // Clean up game session after a delay
+        setTimeout(() => gameSessions.delete(gameId), 5000);
       }
 
       // Broadcast game state (30 Hz)
@@ -362,6 +585,86 @@ setInterval(() => {
 // Helper functions
 function generateGameId(): string {
   return 'g_' + Math.random().toString(36).substr(2, 8);
+}
+
+function calculateELO(playerELO: number, opponentELO: number, won: boolean): number {
+  const K = 32; // Standard K-factor
+  const expectedScore = 1 / (1 + Math.pow(10, (opponentELO - playerELO) / 400));
+  const actualScore = won ? 1 : 0;
+  const eloChange = K * (actualScore - expectedScore);
+  return Math.round(playerELO + eloChange);
+}
+
+async function updatePlayerELO(gameSession: any, winnerId: string, loserId: string) {
+  try {
+    // Get current ELO for both players
+    const { data: winnerData } = await supabase
+      .from('users')
+      .select('elo, games_played, wins')
+      .eq('id', winnerId)
+      .single();
+
+    const { data: loserData } = await supabase
+      .from('users')
+      .select('elo, games_played, losses')
+      .eq('id', loserId)
+      .single();
+
+    if (!winnerData || !loserData) return;
+
+    const winnerELOBefore = winnerData.elo;
+    const loserELOBefore = loserData.elo;
+
+    // Calculate new ELO
+    const newWinnerELO = calculateELO(winnerELOBefore, loserELOBefore, true);
+    const newLoserELO = calculateELO(loserELOBefore, winnerELOBefore, false);
+
+    // Get final scores from game engine
+    const finalScores = gameSession.engine.scores;
+
+    // Update ELO and stats in database
+    await Promise.all([
+      supabase
+        .from('users')
+        .update({
+          elo: newWinnerELO,
+          games_played: (winnerData.games_played || 0) + 1,
+          wins: (winnerData.wins || 0) + 1,
+          last_played_at: new Date().toISOString(),
+        })
+        .eq('id', winnerId),
+      supabase
+        .from('users')
+        .update({
+          elo: newLoserELO,
+          games_played: (loserData.games_played || 0) + 1,
+          losses: (loserData.losses || 0) + 1,
+          last_played_at: new Date().toISOString(),
+        })
+        .eq('id', loserId),
+      // Record match in matches table
+      supabase
+        .from('matches')
+        .insert({
+          game_session_id: gameSession.id,
+          player_red_id: gameSession.playerRed,
+          player_blue_id: gameSession.playerBlue,
+          winner_id: winnerId,
+          player_red_elo_before: gameSession.playerRed === winnerId ? winnerELOBefore : loserELOBefore,
+          player_blue_elo_before: gameSession.playerBlue === winnerId ? winnerELOBefore : loserELOBefore,
+          player_red_elo_after: gameSession.playerRed === winnerId ? newWinnerELO : newLoserELO,
+          player_blue_elo_after: gameSession.playerBlue === winnerId ? newWinnerELO : newLoserELO,
+          final_score_red: finalScores.red,
+          final_score_blue: finalScores.blue,
+          match_type: 'ranked',
+          duration_seconds: Math.floor((Date.now() - gameSession.countdownStartedAt) / 1000),
+        }),
+    ]);
+
+    console.log(`Match recorded: ${winnerId} (${winnerELOBefore} -> ${newWinnerELO}), ${loserId} (${loserELOBefore} -> ${newLoserELO})`);
+  } catch (error) {
+    console.error('Error updating ELO:', error);
+  }
 }
 
 function endMatch(gameId: string, winnerId: string, loserId: string, forfeit: boolean) {

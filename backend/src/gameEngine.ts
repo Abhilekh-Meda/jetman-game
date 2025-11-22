@@ -1,4 +1,4 @@
-import { PHYSICS_CONSTANTS, GAME_CONSTANTS, updatePlayerPhysics, checkBoundaryCollision, handlePlatformCollision, checkPlatformCollision } from '../../shared/physics';
+import { PHYSICS_CONSTANTS, GAME_CONSTANTS, updatePlayerPhysics, checkBoundaryCollision, handlePlatformCollision, checkPlatformCollision } from './physics';
 
 interface ServerPlayer {
   x: number;
