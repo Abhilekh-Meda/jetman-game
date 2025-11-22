@@ -4,6 +4,7 @@ import { Server as SocketIOServer } from 'socket.io';
 import cors from 'cors';
 import dotenv from 'dotenv';
 import { createClient } from '@supabase/supabase-js';
+import { ServerGameEngine } from './gameEngine';
 
 dotenv.config();
 
@@ -46,7 +47,18 @@ interface Player {
 const playerSockets = new Map<string, string>(); // userId -> socketId
 const queuedPlayers = new Map<string, Player>(); // userId -> Player
 const activePlayers = new Map<string, string>(); // userId -> gameId
-const gameSessions = new Map<string, any>();
+const gameSessions = new Map<string, {
+  id: string;
+  playerRed: string;
+  playerBlue: string;
+  playerRedSocket: string;
+  playerBlueSocket: string;
+  engine: ServerGameEngine;
+  status: 'countdown' | 'in_progress' | 'finished';
+  countdownStartedAt: number;
+  disconnectedPlayer: string | null;
+  disconnectTimer: NodeJS.Timeout | null;
+}>();
 
 // Routes
 app.get('/health', (req, res) => {
@@ -175,13 +187,19 @@ io.on('connection', (socket: any) => {
     const gameSession = gameSessions.get(data.gameId);
     if (!gameSession) return;
 
-    // Process input (will be handled by game engine)
-    if (!gameSession.inputBuffer) gameSession.inputBuffer = {};
-    if (!gameSession.inputBuffer[userId]) gameSession.inputBuffer[userId] = [];
-    gameSession.inputBuffer[userId].push({
+    // Determine player color
+    const color = userId === gameSession.playerRed ? 'red' : 'blue';
+    if (color === 'red' && userId !== gameSession.playerRed) return;
+    if (color === 'blue' && userId !== gameSession.playerBlue) return;
+
+    // Add input to game engine
+    gameSession.engine.addInput(color, {
       id: data.inputId,
-      keys: data.keys,
-      timestamp: Date.now(),
+      keys: {
+        ArrowUp: data.keys.ArrowUp || false,
+        ArrowLeft: data.keys.ArrowLeft || false,
+        ArrowRight: data.keys.ArrowRight || false,
+      },
     });
   });
 
@@ -232,15 +250,17 @@ setInterval(() => {
       if (Math.abs(player1.elo - player2.elo) <= eloRange) {
         // Match found!
         const gameId = generateGameId();
+        const engine = new ServerGameEngine(gameId, player1.id, player2.id, 1920, 1080);
+
         const game = {
           id: gameId,
           playerRed: player1.id,
           playerBlue: player2.id,
-          status: 'in_progress',
-          startTime: Date.now(),
-          scores: { red: 0, blue: 0 },
-          inputBuffer: {},
-          tick: 0,
+          playerRedSocket: player1.socketId,
+          playerBlueSocket: player2.socketId,
+          engine,
+          status: 'countdown' as const,
+          countdownStartedAt: Date.now(),
           disconnectedPlayer: null,
           disconnectTimer: null,
         };
@@ -278,6 +298,66 @@ setInterval(() => {
     }
   }
 }, 2000);
+
+// Game loop (30 TPS)
+setInterval(() => {
+  const now = Date.now();
+
+  for (const [gameId, gameSession] of gameSessions.entries()) {
+    // Handle countdown phase
+    if (gameSession.status === 'countdown') {
+      const countdownElapsed = now - gameSession.countdownStartedAt;
+      const countdownSeconds = 3 - Math.floor(countdownElapsed / 1000);
+
+      if (countdownSeconds <= 0) {
+        // Start game
+        gameSession.status = 'in_progress';
+        gameSession.engine.start();
+        io.to(gameId).emit('game_started', {
+          gameId,
+          initialState: gameSession.engine.getState(),
+        });
+        console.log(`Game ${gameId} started`);
+      } else {
+        // Send countdown tick
+        io.to(gameId).emit('game_countdown', { countdown: countdownSeconds });
+      }
+    }
+
+    // Handle in-progress game
+    if (gameSession.status === 'in_progress') {
+      // Tick the game engine
+      gameSession.engine.tick_();
+
+      // Check if game is over
+      if (gameSession.engine.isGameOver()) {
+        const winner = gameSession.engine.getWinner();
+        gameSession.status = 'finished';
+
+        io.to(gameId).emit('match_end', {
+          gameId,
+          winnerId: winner === 'red' ? gameSession.playerRed : gameSession.playerBlue,
+          loserId: winner === 'red' ? gameSession.playerBlue : gameSession.playerRed,
+          finalScores: gameSession.engine.scores,
+          duration: Math.floor((now - gameSession.countdownStartedAt) / 1000),
+        });
+
+        console.log(`Game ${gameId} ended. Winner: ${winner}`);
+      }
+
+      // Broadcast game state (30 Hz)
+      const state = gameSession.engine.getState();
+      const lastProcessedInputs = gameSession.engine.getLastProcessedInputIds();
+
+      io.to(gameId).emit('game_state', {
+        tick: state.tick,
+        players: state.players,
+        scores: state.scores,
+        lastProcessedInputs,
+      });
+    }
+  }
+}, 1000 / 30); // 30 ticks per second
 
 // Helper functions
 function generateGameId(): string {

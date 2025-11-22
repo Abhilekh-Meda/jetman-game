@@ -39,9 +39,11 @@ export default function Lobby() {
     router.push('/');
   };
 
-  const handleGetMatched = () => {
-    // TODO: Implement matchmaking
-    router.push('/game/match');
+  const handleGetMatched = async () => {
+    const { data } = await supabase.auth.getSession();
+    if (data.session && user) {
+      router.push(`/matchmaking?userId=${data.session.user.id}&elo=${user.elo}`);
+    }
   };
 
   const handleCreatePrivateGame = () => {
