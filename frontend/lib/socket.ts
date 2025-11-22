@@ -6,9 +6,6 @@ export function initializeSocket(token: string): Socket {
   const serverUrl = process.env.NEXT_PUBLIC_GAME_SERVER_URL || 'http://localhost:3001';
 
   socket = io(serverUrl, {
-    auth: {
-      token,
-    },
     reconnection: true,
     reconnectionDelay: 1000,
     reconnectionDelayMax: 5000,
@@ -16,7 +13,9 @@ export function initializeSocket(token: string): Socket {
   });
 
   socket.on('connect', () => {
-    console.log('Connected to game server');
+    console.log('Connected to game server, authenticating...');
+    // Emit authenticate event with token
+    socket!.emit('authenticate', { token });
   });
 
   socket.on('connect_error', (error) => {
