@@ -199,11 +199,11 @@ app.get('/api/users/:userId/matches', async (req, res) => {
       .order('played_at', { ascending: false })
       .limit(limit);
 
-    if (error) {
+    if (error || !matches) {
       return res.status(500).json({ error: 'Failed to fetch matches' });
     }
 
-    const matchHistory = (matches || []).map((match) => ({
+    const matchHistory = matches.map((match: any) => ({
       ...match,
       isWin: match.winner_id === userId,
       opponentId: match.player_red_id === userId ? match.player_blue_id : match.player_red_id,
